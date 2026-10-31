@@ -1,4 +1,3 @@
-/* =====================================================================
    SISTEMA COMERCIAL · app.js
    Ventas, compras, inventario por bodegas con costo promedio, kardex,
    cartera, usuarios con roles e informes en Excel. Backend: Supabase.
@@ -24,6 +23,7 @@ const fq = n => (Number(n) || 0).toLocaleString(LOC, { maximumFractionDigits: 3 
 const num = v => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
 const r3 = n => Math.round((Number(n) || 0) * 1000) / 1000;
+const r4 = n => Math.round((Number(n) || 0) * 10000) / 10000;
 function hoy(off = 0) { const d = new Date(); d.setDate(d.getDate() + off); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); }
 function sumarDias(fecha, n) { const d = new Date(fecha + 'T12:00:00'); d.setDate(d.getDate() + (n || 0)); return d.toISOString().slice(0, 10); }
 const inicioMes = () => hoy().slice(0, 8) + '01';
@@ -462,12 +462,13 @@ async function vEditor(tipo, origenId, modo) {
   const showStock = d.salida && !desdeRem;
   const esCompra = !!d.compra;
   let inv = new Map();
-  const nl = () => ({ producto_id: null, cantidad: 1, precio: 0, descuento_pct: 0, iva_pct: 0 });
-  let lines = oItems.map(it => ({
-    producto_id: it.producto_id,
-    cantidad: desdeOC ? r3(it.cantidad - it.cantidad_recibida) : +it.cantidad,
-    precio: +it.precio, descuento_pct: +it.descuento_pct, iva_pct: +it.iva_pct,
-  })).filter(l => l.cantidad > 0);
+  const nl = () => ({ producto_id: null, cantidad: 1, precio: 0, descuento_pct: 0, iva_pct: 0, valor: '' });
+  let lines = oItems.map(it => {
+    const cantidad = desdeOC ? r3(it.cantidad - it.cantidad_recibida) : +it.cantidad;
+    const l = { producto_id: it.producto_id, cantidad, precio: +it.precio, descuento_pct: +it.descuento_pct, iva_pct: +it.iva_pct, valor: '' };
+    if (esCompra) { l.precio = r4(l.precio * (1 - l.descuento_pct / 100)); l.descuento_pct = 0; l.valor = r2(l.precio * cantidad); }
+    return l;
+  }).filter(l => l.cantidad > 0);
   if (!lines.length) lines = [nl()];
   const terIni = origen ? (esCli ? S.clientes : S.proveedores).find(t => t.id === (esCli ? origen.cliente_id : origen.proveedor_id)) : null;
   const bodIni = origen?.bodega_id || S.bodegas.find(b => b.activo)?.id || '';
@@ -489,15 +490,16 @@ async function vEditor(tipo, origenId, modo) {
         <label id="lb-mp">Medio de pago<select id="e-mp">${MEDIOS.map(m => `<option>${m}</option>`).join('')}</select></label>` : ''}
       ${vencLabel ? `<label id="lb-venc">${vencLabel}<input type="date" id="e-venc" value="${vencIni}"></label>` : ''}
       ${tipo === 'COM' ? `<label>N° factura del proveedor<input id="e-ref" placeholder="Ej: FE-1234"></label>` : ''}
+      ${esCompra ? `<label class="chk span2"><input type="checkbox" id="e-coniva"> Los valores digitados ya incluyen IVA</label>` : ''}
       <label class="span-all">Observaciones<textarea id="e-obs" rows="2" placeholder="Condiciones, notas de entrega, garantía…"></textarea></label>
     </div>
     <div class="card">
       <div class="card-h"><h3>Productos</h3>${desdeRem ? '<small class="muted">Las cantidades vienen de la remisión y ya salieron del inventario</small>' : '<button class="btn" id="btn-add" type="button">Agregar producto</button>'}</div>
-      <div class="tbl-wrap"><table class="tbl lines"><thead><tr><th>Producto</th>${showStock ? '<th class="num">Disponible</th>' : ''}<th class="num">Cantidad</th><th class="num">${esCompra ? 'Costo unitario' : 'Precio unitario'}</th><th class="num">Desc. %</th><th class="num">IVA %</th><th class="num">Total</th><th></th></tr></thead>
+      <div class="tbl-wrap"><table class="tbl lines"><thead><tr><th>Producto</th>${showStock ? '<th class="num">Disponible</th>' : ''}<th class="num">Cantidad</th>${esCompra ? '<th class="num">Valor total del producto</th><th class="num">Costo unitario (calculado)</th>' : '<th class="num">Precio unitario</th><th class="num">Desc. %</th>'}<th class="num">IVA %</th><th class="num">Total con IVA</th><th></th></tr></thead>
       <tbody id="e-lines"></tbody></table></div>
       <datalist id="dl-prod">${prods.map(p => `<option value="${esc(prodLabel(p))}"></option>`).join('')}</datalist>
       <datalist id="dl-ter"></datalist>
-      ${esCompra ? '<p class="muted"><small>El costo que entra al inventario es el valor neto (con descuento, sin IVA). El costo promedio de la bodega se recalcula automáticamente.</small></p>' : ''}
+      ${esCompra ? '<p class="muted"><small>Digita la cantidad y el valor total de cada producto como aparece en la factura (ya con descuentos). El sistema divide y calcula el costo unitario. Si lo prefieres, también puedes escribir el costo unitario y el total se calcula solo. Al inventario entra el valor sin IVA y el costo promedio de la bodega se recalcula automáticamente.</small></p>' : ''}
       <div class="totals" id="e-tot"></div>
       <div class="form-actions"><button class="btn primary lg" id="btn-save">Guardar ${d.n.toLowerCase()}</button></div>
     </div>`;
@@ -538,7 +540,15 @@ async function vEditor(tipo, origenId, modo) {
   }
   if (usaBodega) $('#e-bod').onchange = () => run(loadInv);
 
-  const calc = l => { const bruto = num(l.cantidad) * num(l.precio); const s = bruto * (1 - num(l.descuento_pct) / 100); const iva = s * num(l.iva_pct) / 100; return { bruto, sub: s, iva, total: s + iva }; };
+  // Compras: el valor total digitado manda; el costo unitario = valor neto / cantidad
+  const conIva = () => esCompra && !!$('#e-coniva')?.checked;
+  const netoLinea = l => conIva() ? num(l.valor) / (1 + num(l.iva_pct) / 100) : num(l.valor);
+  const syncPrecio = l => { l.precio = num(l.cantidad) > 0 ? r4(netoLinea(l) / num(l.cantidad)) : 0; };
+  const syncValor = l => { const n = num(l.cantidad) * num(l.precio); l.valor = r2(conIva() ? n * (1 + num(l.iva_pct) / 100) : n); };
+  const calc = l => {
+    if (esCompra) { const s = netoLinea(l), iva = s * num(l.iva_pct) / 100; return { bruto: s, sub: s, iva, total: s + iva }; }
+    const bruto = num(l.cantidad) * num(l.precio); const s = bruto * (1 - num(l.descuento_pct) / 100); const iva = s * num(l.iva_pct) / 100; return { bruto, sub: s, iva, total: s + iva };
+  };
   const tb = $('#e-lines');
   function renderLines() {
     tb.innerHTML = lines.map((l, i) => {
@@ -548,8 +558,11 @@ async function vEditor(tipo, origenId, modo) {
         <td class="w-prod"><input class="in-prod" list="dl-prod" value="${p ? esc(prodLabel(p)) : ''}" placeholder="Código o nombre del producto" ${desdeRem ? 'disabled' : ''}></td>
         ${showStock ? `<td class="num ${falta ? 'txt-err' : 'muted'}">${p ? fq(disp) + ' ' + esc(p.unidad) : ''}</td>` : ''}
         <td><input type="number" class="in-n" data-f="cantidad" step="any" min="0" value="${l.cantidad}" ${desdeRem ? 'disabled' : ''}></td>
-        <td><input type="number" class="in-n" data-f="precio" step="any" min="0" value="${l.precio}"></td>
-        <td><input type="number" class="in-n xs" data-f="descuento_pct" step="any" min="0" max="100" value="${l.descuento_pct}"></td>
+        ${esCompra
+          ? `<td><input type="number" class="in-n" data-f="valor" step="any" min="0" value="${l.valor}" placeholder="Valor de la factura"></td>
+             <td><input type="number" class="in-n" data-f="precio" step="any" min="0" value="${l.precio}"></td>`
+          : `<td><input type="number" class="in-n" data-f="precio" step="any" min="0" value="${l.precio}"></td>
+             <td><input type="number" class="in-n xs" data-f="descuento_pct" step="any" min="0" max="100" value="${l.descuento_pct}"></td>`}
         <td><input type="number" class="in-n xs" data-f="iva_pct" step="any" min="0" value="${l.iva_pct}"></td>
         <td class="num lt">${fm(calc(l).total)}</td>
         <td>${desdeRem ? '' : '<button class="btn icon ghost" data-del type="button" aria-label="Quitar línea">✕</button>'}</td></tr>`;
@@ -568,6 +581,7 @@ async function vEditor(tipo, origenId, modo) {
       const p = findBy(prods, prodLabel, e.target.value.trim());
       if (!p) { if (e.target.value) toast('Elige un producto de la lista desplegable', 'err'); e.target.value = ''; lines[i].producto_id = null; return; }
       Object.assign(lines[i], { producto_id: p.id, iva_pct: +p.iva, precio: esCompra ? r2(inv.get(p.id)?.costo_promedio || 0) : +p.precio_venta });
+      if (esCompra) syncValor(lines[i]);
       renderLines();
       tb.querySelector(`tr[data-i="${i}"] [data-f="cantidad"]`)?.select();
     } else if (e.target.dataset.f === 'cantidad' && showStock) renderLines();
@@ -575,8 +589,14 @@ async function vEditor(tipo, origenId, modo) {
   tb.addEventListener('input', e => {
     const f = e.target.dataset.f; if (!f) return;
     const tr = e.target.closest('tr'), l = lines[+tr.dataset.i];
-    l[f] = e.target.value; $('.lt', tr).textContent = fm(calc(l).total); totals();
+    l[f] = e.target.value;
+    if (esCompra) {
+      if (f === 'precio') { syncValor(l); $('[data-f="valor"]', tr).value = l.valor; }
+      else { syncPrecio(l); $('[data-f="precio"]', tr).value = l.precio; }
+    }
+    $('.lt', tr).textContent = fm(calc(l).total); totals();
   });
+  if (esCompra) $('#e-coniva').onchange = () => { lines.forEach(syncPrecio); renderLines(); };
   tb.addEventListener('click', e => {
     if (!e.target.closest('[data-del]')) return;
     lines.splice(+e.target.closest('tr').dataset.i, 1);
@@ -589,7 +609,12 @@ async function vEditor(tipo, origenId, modo) {
   $('#btn-save').onclick = e => run(async () => {
     const t = getTer();
     if (!t) throw new Error(`Elige un ${d.ter} de la lista o créalo con el botón "Crear ${d.ter}"`);
-    const items = lines.filter(l => l.producto_id).map(l => ({ producto_id: l.producto_id, cantidad: num(l.cantidad), precio: num(l.precio), descuento_pct: num(l.descuento_pct), iva_pct: num(l.iva_pct) }));
+    const items = lines.filter(l => l.producto_id).map(l => {
+      const it = { producto_id: l.producto_id, cantidad: num(l.cantidad), precio: num(l.precio), descuento_pct: num(l.descuento_pct), iva_pct: num(l.iva_pct) };
+      if (esCompra) { it.valor_total = r2(netoLinea(l)); it.descuento_pct = 0; }
+      return it;
+    });
+    if (esCompra && items.some(i => i.valor_total <= 0) && !await confirmar('Hay productos con valor total en cero. ¿Guardar de todas formas?', 'Guardar')) return;
     if (!items.length) throw new Error('Agrega al menos un producto');
     if (items.some(i => i.cantidad <= 0)) throw new Error('Hay productos con cantidad en cero');
     const p = { tipo, fecha: $('#e-fecha').value, observaciones: $('#e-obs').value.trim() || null, items };
